@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"strings"
 	"time"
 
 	ethereum "github.com/ethereum/go-ethereum"
@@ -20,12 +21,14 @@ import (
 // MarketplaceScanner periodically scans blocks for marketplace events
 // (Listed / Cancelled / Sold) and syncs them into the orders table.
 type MarketplaceScanner struct {
-	client       *ethclient.Client
-	contract     common.Address
-	abi          abi.ABI
-	orderStore   *store.OrderStore
-	logger       *log.Logger
-	pollInterval time.Duration
+	client         *ethclient.Client
+	contract       common.Address
+	abi            abi.ABI
+	orderStore     *store.OrderStore
+	logger         *log.Logger
+	pollInterval   time.Duration
+	maxBatchBlocks uint64
+	lastLimitLog   time.Time
 }
 
 // NewMarketplaceScanner creates a scanner using the NFTMarketplace ABI at docs/NFTMarketplace.abi.json.
@@ -45,12 +48,13 @@ func NewMarketplaceScanner(client *ethclient.Client, contractAddr common.Address
 	}
 
 	return &MarketplaceScanner{
-		client:       client,
-		contract:     contractAddr,
-		abi:          parsedABI,
-		orderStore:   orders,
-		logger:       logger,
-		pollInterval: 5 * time.Second,
+		client:         client,
+		contract:       contractAddr,
+		abi:            parsedABI,
+		orderStore:     orders,
+		logger:         logger,
+		pollInterval:   5 * time.Second,
+		maxBatchBlocks: 100, // small block range per query to avoid RPC "limit exceeded"
 	}, nil
 }
 
@@ -87,28 +91,65 @@ func (s *MarketplaceScanner) Run(ctx context.Context) {
 				continue
 			}
 
+			// Scan in small batches to avoid RPC "limit exceeded" errors.
 			from := lastScanned + 1
-			to := latest
-
-			query := ethereum.FilterQuery{
-				FromBlock: big.NewInt(int64(from)),
-				ToBlock:   big.NewInt(int64(to)),
-				Addresses: []common.Address{s.contract},
-			}
-
-			logs, err := s.client.FilterLogs(ctx, query)
-			if err != nil {
-				s.logger.Printf("marketplace scanner: FilterLogs error (from %d to %d): %v", from, to, err)
-				continue
-			}
-
-			for _, lg := range logs {
-				if err := s.handleLog(ctx, lg); err != nil {
-					s.logger.Printf("marketplace scanner: handleLog error: %v", err)
+			batchSize := s.maxBatchBlocks
+			for from <= latest {
+				to := from + batchSize - 1
+				if to > latest {
+					to = latest
 				}
-				if lg.BlockNumber > lastScanned {
-					lastScanned = lg.BlockNumber
+
+				query := ethereum.FilterQuery{
+					FromBlock: big.NewInt(int64(from)),
+					ToBlock:   big.NewInt(int64(to)),
+					Addresses: []common.Address{s.contract},
 				}
+
+				logs, err := s.client.FilterLogs(ctx, query)
+				if err != nil {
+					limitErr := strings.Contains(err.Error(), "limit exceeded")
+					if limitErr {
+						// Throttle logging for noisy RPC limit errors.
+						now := time.Now()
+						if now.Sub(s.lastLimitLog) > 5*time.Second {
+							s.logger.Printf("marketplace scanner: FilterLogs limit exceeded (from %d to %d)", from, to)
+							s.lastLimitLog = now
+						}
+
+						// If RPC complains about limits, reduce batch size and retry from the same block.
+						if batchSize > 1 {
+							batchSize = batchSize / 2
+							if batchSize < 1 {
+								batchSize = 1
+							}
+							continue
+						}
+						// Already at batch size 1 and still hitting limits: skip this block range.
+						now = time.Now()
+						if now.Sub(s.lastLimitLog) > 5*time.Second {
+							s.logger.Printf("marketplace scanner: skipping block range %d-%d due to persistent RPC limit errors", from, to)
+							s.lastLimitLog = now
+						}
+						lastScanned = to
+						from = to + 1
+						continue
+					}
+
+					// Other errors: log once and break this polling cycle; we'll retry next tick.
+					s.logger.Printf("marketplace scanner: FilterLogs error (from %d to %d): %v", from, to, err)
+					break
+				}
+
+				for _, lg := range logs {
+					if err := s.handleLog(ctx, lg); err != nil {
+						s.logger.Printf("marketplace scanner: handleLog error: %v", err)
+					}
+				}
+
+				// Successfully processed this batch; advance.
+				lastScanned = to
+				from = to + 1
 			}
 		}
 	}
