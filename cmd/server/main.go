@@ -516,6 +516,18 @@ func main() {
 			return
 		}
 
+		// 防止同一钱包重复使用同一张图片：按 owner + url 检查。
+		exists, err := assetStore.ExistsByOwnerAndURL(ctx, owner, uploadRes.URL)
+		if err != nil {
+			log.Printf("ExistsByOwnerAndURL error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "duplicate check failed"})
+			return
+		}
+		if exists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "asset with same url already exists for this owner"})
+			return
+		}
+
 		asset := &store.NftAsset{
 			Name:    name,
 			Owner:   owner,

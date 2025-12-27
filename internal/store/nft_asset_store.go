@@ -161,6 +161,25 @@ LIMIT ?`
 	return out, rows.Err()
 }
 
+// ExistsByOwnerAndURL returns true if the given owner already has an asset with the same URL.
+func (s *NftAssetStore) ExistsByOwnerAndURL(ctx context.Context, owner, url string) (bool, error) {
+	const q = `
+SELECT 1
+FROM nft_assets
+WHERE owner = ? AND url = ? AND deleted = 0
+LIMIT 1`
+
+	row := s.db.QueryRowContext(ctx, q, owner, url)
+	var dummy int
+	if err := row.Scan(&dummy); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // UpdateMintInfo updates token_id, nft_address and amount after on-chain mint.
 func (s *NftAssetStore) UpdateMintInfo(ctx context.Context, id int64, tokenID int64, nftAddress string, amount int64) error {
 	const q = `
