@@ -115,4 +115,3 @@ func (c *PinataClient) UploadFile(ctx context.Context, name string, r io.Reader)
 		URL: url,
 	}, nil
 }
-

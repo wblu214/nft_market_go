@@ -19,15 +19,15 @@ import (
 
 // basicConfig holds minimal runtime configuration for the demo backend.
 type basicConfig struct {
-	RPCURL              string
-	MarketplaceAddress  string
-	ProjectNFTAddress   string
-	Project1155Address  string
-	MySQLDSN            string
-	PinataAPIURL        string
-	PinataGatewayURL    string
-	PinataAPIKey        string
-	PinataSecretAPIKey  string
+	RPCURL             string
+	MarketplaceAddress string
+	ProjectNFTAddress  string
+	Project1155Address string
+	MySQLDSN           string
+	PinataAPIURL       string
+	PinataGatewayURL   string
+	PinataAPIKey       string
+	PinataSecretAPIKey string
 }
 
 // loadConfig reads config from environment variables.
