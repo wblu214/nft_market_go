@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
+	"gopkg.in/yaml.v3"
 
 	"github.com/nft_market_go/internal/chain"
 	"github.com/nft_market_go/internal/ipfs"
@@ -22,6 +23,7 @@ import (
 // basicConfig holds minimal runtime configuration for the demo backend.
 type basicConfig struct {
 	RPCURL             string
+	ChainID            int64
 	MarketplaceAddress string
 	ProjectNFTAddress  string
 	Project1155Address string
@@ -30,20 +32,96 @@ type basicConfig struct {
 	PinataGatewayURL   string
 	PinataAPIKey       string
 	PinataSecretAPIKey string
+	HTTPAddr           string
 }
 
-// loadConfig reads config from environment variables.
+type yamlConfig struct {
+	Blockchain struct {
+		RPCURL  string `yaml:"rpc-url"`
+		ChainID int64  `yaml:"chain-id"`
+	} `yaml:"blockchain"`
+	BSC struct {
+		RPCURL string `yaml:"rpc-url"`
+	} `yaml:"bsc"`
+	Contracts struct {
+		Marketplace string `yaml:"marketplace"`
+		ProjectNFT  string `yaml:"project-nft"`
+		Project1155 string `yaml:"project-1155"`
+	} `yaml:"contracts"`
+	MySQL struct {
+		DSN string `yaml:"dsn"`
+	} `yaml:"mysql"`
+	IPFS struct {
+		APIURL       string `yaml:"api-url"`
+		GatewayURL   string `yaml:"gateway-url"`
+		APIKey       string `yaml:"api-key"`
+		SecretAPIKey string `yaml:"secret-api-key"`
+	} `yaml:"ipfs"`
+	Server struct {
+		Addr string `yaml:"addr"`
+	} `yaml:"server"`
+}
+
+// loadConfig reads config from config.yaml (if present) and environment variables.
+// Environment variables override YAML values when both are set.
 func loadConfig() (*basicConfig, error) {
-	cfg := &basicConfig{
-		RPCURL:             os.Getenv("BSC_TESTNET_RPC_URL"),
-		MarketplaceAddress: os.Getenv("NFT_MARKETPLACE_ADDRESS"),
-		ProjectNFTAddress:  os.Getenv("PROJECT_NFT_ADDRESS"),
-		Project1155Address: os.Getenv("PROJECT_1155_ADDRESS"),
-		MySQLDSN:           os.Getenv("MYSQL_DSN"),
-		PinataAPIURL:       os.Getenv("PINATA_API_URL"),
-		PinataGatewayURL:   os.Getenv("PINATA_GATEWAY_URL"),
-		PinataAPIKey:       os.Getenv("PINATA_API_KEY"),
-		PinataSecretAPIKey: os.Getenv("PINATA_SECRET_API_KEY"),
+	cfg := &basicConfig{}
+
+	// 1) Load from config.yaml if it exists.
+	if data, err := os.ReadFile("config.yaml"); err == nil {
+		var yc yamlConfig
+		if err := yaml.Unmarshal(data, &yc); err != nil {
+			return nil, err
+		}
+
+		// Prefer the more generic blockchain section if present, fall back to legacy bsc.
+		if yc.Blockchain.RPCURL != "" {
+			cfg.RPCURL = yc.Blockchain.RPCURL
+		} else {
+			cfg.RPCURL = yc.BSC.RPCURL
+		}
+		cfg.ChainID = yc.Blockchain.ChainID
+		cfg.MarketplaceAddress = yc.Contracts.Marketplace
+		cfg.ProjectNFTAddress = yc.Contracts.ProjectNFT
+		cfg.Project1155Address = yc.Contracts.Project1155
+		cfg.MySQLDSN = yc.MySQL.DSN
+		cfg.PinataAPIURL = yc.IPFS.APIURL
+		cfg.PinataGatewayURL = yc.IPFS.GatewayURL
+		cfg.PinataAPIKey = yc.IPFS.APIKey
+		cfg.PinataSecretAPIKey = yc.IPFS.SecretAPIKey
+		cfg.HTTPAddr = yc.Server.Addr
+	}
+
+	// 2) Override with environment variables when set.
+	if v := os.Getenv("BSC_TESTNET_RPC_URL"); v != "" {
+		cfg.RPCURL = v
+	}
+	if v := os.Getenv("NFT_MARKETPLACE_ADDRESS"); v != "" {
+		cfg.MarketplaceAddress = v
+	}
+	if v := os.Getenv("PROJECT_NFT_ADDRESS"); v != "" {
+		cfg.ProjectNFTAddress = v
+	}
+	if v := os.Getenv("PROJECT_1155_ADDRESS"); v != "" {
+		cfg.Project1155Address = v
+	}
+	if v := os.Getenv("MYSQL_DSN"); v != "" {
+		cfg.MySQLDSN = v
+	}
+	if v := os.Getenv("PINATA_API_URL"); v != "" {
+		cfg.PinataAPIURL = v
+	}
+	if v := os.Getenv("PINATA_GATEWAY_URL"); v != "" {
+		cfg.PinataGatewayURL = v
+	}
+	if v := os.Getenv("PINATA_API_KEY"); v != "" {
+		cfg.PinataAPIKey = v
+	}
+	if v := os.Getenv("PINATA_SECRET_API_KEY"); v != "" {
+		cfg.PinataSecretAPIKey = v
+	}
+	if v := os.Getenv("HTTP_ADDR"); v != "" {
+		cfg.HTTPAddr = v
 	}
 
 	if cfg.RPCURL == "" {
@@ -447,7 +525,10 @@ func main() {
 		c.String(http.StatusOK, swaggerHTML)
 	})
 
-	addr := ":8080"
+	addr := cfg.HTTPAddr
+	if addr == "" {
+		addr = ":8080"
+	}
 	log.Printf("starting http server on %s", addr)
 	if err := router.Run(addr); err != nil {
 		log.Fatalf("http server error: %v", err)
