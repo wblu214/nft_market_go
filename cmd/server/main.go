@@ -9,10 +9,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/nft_market_go/internal/chain"
 	"github.com/nft_market_go/internal/ipfs"
 	"github.com/nft_market_go/internal/store"
 )
@@ -263,6 +265,20 @@ func main() {
 		cfg.PinataAPIKey,
 		cfg.PinataSecretAPIKey,
 	)
+
+	// Start marketplace event scanner (Listed / Cancelled / Sold) to sync orders table.
+	if cfg.MarketplaceAddress == "" {
+		log.Printf("NFT_MARKETPLACE_ADDRESS not set, marketplace scanner disabled")
+	} else {
+		marketAddr := common.HexToAddress(cfg.MarketplaceAddress)
+		scanner, err := chain.NewMarketplaceScanner(ethClient, marketAddr, orderStore, log.Default())
+		if err != nil {
+			log.Printf("failed to init marketplace scanner: %v", err)
+		} else {
+			go scanner.Run(context.Background())
+			log.Printf("marketplace scanner started for contract %s", cfg.MarketplaceAddress)
+		}
+	}
 
 	log.Printf("connected to rpc %s", cfg.RPCURL)
 
