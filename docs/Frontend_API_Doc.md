@@ -185,12 +185,52 @@
 这样前端在任何“从链上拿到 NFT 信息”的场景下，只需要把 `nft_address` + `token_id` 传给后端，就能查回对应的图片和元数据。
 
 
-## 3. 订单查询（从链上事件同步到 MySQL）
+## 3. 订单写入与查询
 
-后端通过订阅 `NFTMarketplace` 合约的事件 `Listed / Cancelled / Sold`，把链上的订单状态同步到 `orders` 表。  
-前端不需要自己扫链，直接调用下面两个接口即可。
+后端通过两种方式维护 `orders` 表：
+- 订阅 `NFTMarketplace` 的事件 `Listed / Cancelled / Sold`（自动同步）；
+- 前端在上架成功后主动回传一份订单信息（推荐，避免 RPC 不稳定）。
 
-### 3.1 查询最近订单列表
+### 3.1 上架成功后回传订单信息（推荐）
+
+`POST /api/v1/orders`
+
+- 功能：前端在链上调用 `NFTMarketplace.list(...)` 成功后，把该笔订单的关键字段回传给后端，立即写入 `orders` 表。
+- Body（JSON）：
+
+```json
+{
+  "listing_id": 1001,
+  "seller": "0xSeller...",
+  "nft_address": "0xaa6a15D595bA8F69680465FBE61d9d886057Cb1E",
+  "token_id": 1,
+  "amount": 1,
+  "price": "1000000000000000000",
+  "tx_hash": "0x9f0593086fd71fafa7fa1f5f65921893ab4f8c8733b2f15ebe9529423d46b107"
+}
+```
+
+- 字段说明：
+  - `listing_id`：链上的 `listingId`（合约 `list` 的返回值或事件参数）
+  - `seller`：当前钱包地址
+  - `nft_address`：NFT 合约地址（ERC721 / ERC1155）
+  - `token_id`：上架的 `tokenId`（或 ERC1155 的 `id`）
+  - `amount`：数量（ERC721 = 1；ERC1155 为上架份数）
+  - `price`：价格（wei，十进制字符串）
+  - `tx_hash`：`list` 这笔交易的 hash（可选，但建议带上）
+
+- 后端处理：
+  - 写入 / 更新 `orders` 表，对应一条 `status = "LISTED"` 的订单；
+  - 后续成交 / 撤单仍由链上事件将 `status` 更新为 `SUCCESS` / `CANCELED`。
+
+- 前端调用时机：
+  1. 钱包调用 `NFTMarketplace.list(...)`，等待交易确认；
+  2. 拿到 `listingId`、`txHash`、`nft_address`、`token_id`、`amount`、`price`；
+  3. 立刻调用 `POST /api/v1/orders` 把这些字段传给后端。
+
+---
+
+### 3.2 查询最近订单列表
 
 `GET /api/v1/orders`
 
@@ -242,7 +282,7 @@
 
 ---
 
-### 3.2 按 listingId 查询单个订单
+### 3.3 按 listingId 查询单个订单
 
 `GET /api/v1/orders/:listingId`
 

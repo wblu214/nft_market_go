@@ -100,10 +100,20 @@ func (s *MarketplaceScanner) Run(ctx context.Context) {
 					to = latest
 				}
 
+				// Only care about Listed / Cancelled / Sold events.
+				topics := [][]common.Hash{
+					{
+						s.abi.Events["Listed"].ID,
+						s.abi.Events["Cancelled"].ID,
+						s.abi.Events["Sold"].ID,
+					},
+				}
+
 				query := ethereum.FilterQuery{
 					FromBlock: big.NewInt(int64(from)),
 					ToBlock:   big.NewInt(int64(to)),
 					Addresses: []common.Address{s.contract},
+					Topics:    topics,
 				}
 
 				logs, err := s.client.FilterLogs(ctx, query)

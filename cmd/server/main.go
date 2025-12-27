@@ -313,6 +313,53 @@ const swaggerJSON = `{
             "description": "OK"
           }
         }
+      },
+      "post": {
+        "summary": "Create or update an order record after on-chain listing (frontend callback)",
+        "consumes": ["application/json"],
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "listing_id": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "seller": {
+                  "type": "string"
+                },
+                "nft_address": {
+                  "type": "string"
+                },
+                "token_id": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "amount": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "price": {
+                  "type": "string",
+                  "description": "Price in wei, decimal string"
+                },
+                "tx_hash": {
+                  "type": "string"
+                }
+              },
+              "required": ["listing_id", "seller", "nft_address", "token_id", "price"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
       }
     },
     "/api/v1/orders/{listingId}": {
@@ -333,6 +380,45 @@ const swaggerJSON = `{
           },
           "404": {
             "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/v1/orders/{listingId}/status": {
+      "post": {
+        "summary": "Update order status after cancel or buy (frontend callback)",
+        "consumes": ["application/json"],
+        "parameters": [
+          {
+            "name": "listingId",
+            "in": "path",
+            "required": true,
+            "type": "integer",
+            "format": "int64"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "description": "CANCELED or SUCCESS"
+                },
+                "buyer": {
+                  "type": "string",
+                  "description": "Buyer address, required when status is SUCCESS"
+                }
+              },
+              "required": ["status"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
           }
         }
       }
@@ -480,6 +566,133 @@ func main() {
 		}
 
 		c.JSON(http.StatusOK, order)
+	})
+
+	// Create or update an order record after frontend successfully lists on-chain.
+	// This is a fallback to RPC event scanning: frontend passes listingId and related fields.
+	api.POST("/orders", func(c *gin.Context) {
+		var req struct {
+			ListingID  int64  `json:"listing_id"`
+			Seller     string `json:"seller"`
+			NFTAddress string `json:"nft_address"`
+			TokenID    int64  `json:"token_id"`
+			Amount     int64  `json:"amount"`
+			Price      string `json:"price"`   // decimal string in wei
+			TxHash     string `json:"tx_hash"` // optional tx hash of list transaction
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+			return
+		}
+		if req.ListingID <= 0 || req.Seller == "" || req.NFTAddress == "" || req.TokenID <= 0 || req.Price == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "listing_id, seller, nft_address, token_id, price are required"})
+			return
+		}
+		if req.Amount <= 0 {
+			req.Amount = 1
+		}
+
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+
+		order := &store.Order{
+			ListingID:  req.ListingID,
+			Seller:     req.Seller,
+			Buyer:      "",
+			NFTName:    "",
+			NFTAddress: req.NFTAddress,
+			TokenID:    req.TokenID,
+			Amount:     req.Amount,
+			Price:      req.Price,
+			Status:     store.OrderStatusListed,
+			TxHash:     req.TxHash,
+			Deleted:    0,
+		}
+
+		if err := orderStore.Upsert(ctx, order); err != nil {
+			log.Printf("Create order error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db upsert failed"})
+			return
+		}
+
+		// Read back full record including order_id / timestamps.
+		orderOut, err := orderStore.GetByID(ctx, req.ListingID)
+		if err != nil {
+			log.Printf("GetByID after create order error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db query failed"})
+			return
+		}
+
+		c.JSON(http.StatusOK, orderOut)
+	})
+
+	// Update order status after frontend confirms cancel / buy on-chain.
+	// Example payloads:
+	//  - cancel: { "status": "CANCELED" }
+	//  - buy:    { "status": "SUCCESS", "buyer": "0xBuyer..." }
+	api.POST("/orders/:listingId/status", func(c *gin.Context) {
+		idStr := c.Param("listingId")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid listingId"})
+			return
+		}
+
+		var req struct {
+			Status string `json:"status"`
+			Buyer  string `json:"buyer"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+			return
+		}
+
+		var newStatus store.OrderStatus
+		switch req.Status {
+		case string(store.OrderStatusCanceled):
+			newStatus = store.OrderStatusCanceled
+		case string(store.OrderStatusSuccess):
+			newStatus = store.OrderStatusSuccess
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "status must be CANCELED or SUCCESS"})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+
+		order, err := orderStore.GetByID(ctx, id)
+		if err != nil {
+			if err != sql.ErrNoRows {
+				log.Printf("GetByID in status update error: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "db query failed"})
+				return
+			}
+			// If no existing row, create a minimal one.
+			order = &store.Order{
+				ListingID: id,
+			}
+		}
+
+		order.Status = newStatus
+		if newStatus == store.OrderStatusSuccess && req.Buyer != "" {
+			order.Buyer = req.Buyer
+		}
+
+		if err := orderStore.Upsert(ctx, order); err != nil {
+			log.Printf("Update order status error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db upsert failed"})
+			return
+		}
+
+		orderOut, err := orderStore.GetByID(ctx, id)
+		if err != nil {
+			log.Printf("GetByID after status update error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db query failed"})
+			return
+		}
+
+		c.JSON(http.StatusOK, orderOut)
 	})
 
 	// NFT assets: upload to IPFS + metadata CRUD.
