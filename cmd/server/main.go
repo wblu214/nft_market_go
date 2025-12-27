@@ -235,6 +235,76 @@ const swaggerJSON = `{
         }
       }
     },
+    "/api/v1/assets/{id}/mint-info": {
+      "post": {
+        "summary": "Update minted NFT info (token_id, nft_address, amount) for an asset",
+        "consumes": ["application/json"],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "integer",
+            "format": "int64"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "token_id": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "nft_address": {
+                  "type": "string"
+                },
+                "amount": {
+                  "type": "integer",
+                  "format": "int64"
+                }
+              },
+              "required": ["token_id", "nft_address"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/by-nft": {
+      "get": {
+        "summary": "Get NFT asset by on-chain nft_address and token_id",
+        "parameters": [
+          {
+            "name": "nft_address",
+            "in": "query",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "token_id",
+            "in": "query",
+            "required": true,
+            "type": "integer",
+            "format": "int64"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
     "/api/v1/orders": {
       "get": {
         "summary": "List recent marketplace orders",
@@ -463,6 +533,82 @@ func main() {
 			return
 		}
 		asset.ID = id
+
+		c.JSON(http.StatusOK, asset)
+	})
+
+	// Update minted NFT info (token_id, nft_address, amount) after on-chain mint.
+	api.POST("/assets/:id/mint-info", func(c *gin.Context) {
+		idStr := c.Param("id")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+			return
+		}
+
+		var req struct {
+			TokenID    int64  `json:"token_id"`
+			NFTAddress string `json:"nft_address"`
+			Amount     int64  `json:"amount"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+			return
+		}
+		if req.TokenID <= 0 || req.NFTAddress == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "token_id and nft_address are required"})
+			return
+		}
+		if req.Amount <= 0 {
+			req.Amount = 1
+		}
+
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+
+		if err := assetStore.UpdateMintInfo(ctx, id, req.TokenID, req.NFTAddress, req.Amount); err != nil {
+			log.Printf("UpdateMintInfo error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db update failed"})
+			return
+		}
+
+		asset, err := assetStore.GetByID(ctx, id)
+		if err != nil {
+			log.Printf("GetByID after UpdateMintInfo error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db query failed"})
+			return
+		}
+
+		c.JSON(http.StatusOK, asset)
+	})
+
+	// Get asset by on-chain NFT (nft_address + token_id).
+	api.GET("/assets/by-nft", func(c *gin.Context) {
+		nftAddr := c.Query("nft_address")
+		tokenIDStr := c.Query("token_id")
+		if nftAddr == "" || tokenIDStr == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "nft_address and token_id are required"})
+			return
+		}
+		tokenID, err := strconv.ParseInt(tokenIDStr, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid token_id"})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		defer cancel()
+
+		asset, err := assetStore.GetByNFT(ctx, nftAddr, tokenID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			} else {
+				log.Printf("GetByNFT error: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			}
+			return
+		}
 
 		c.JSON(http.StatusOK, asset)
 	})

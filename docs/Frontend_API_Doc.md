@@ -64,11 +64,43 @@
 - 前端使用建议：
   1. 用户选图 → 前端调用该接口，拿到 `cid / url`。
   2. 将 `url` 作为元数据里的 image 字段，组装完整 metadata（如 IPFS JSON），再调用链上 `ProjectNFT.mint(to, uri)` / `Project1155.mint(...)`。
-  3. 链上 mint 成功后，可以在后端增加接口/字段记录 `token_id`、`nft_address`（目前预留字段，暂未自动回填）。
+  3. 链上 mint 成功后，调用 2.2 所述接口，把 `token_id` / `nft_address` / `amount` 回传给后端。
 
 ---
 
-### 2.2 按 ID 查询单个素材
+### 2.2 链上 mint 之后回传 tokenId / nftAddress / amount
+
+`POST /api/v1/assets/{id}/mint-info`
+
+- 功能：链上 mint 成功后，前端把生成的 `tokenId`、`nftAddress`、`amount` 回传给后端，补全 `nft_assets` 中的字段。
+- 路径参数：
+  - `id`（int64, 必填）：`nft_assets.id`，即第 2.1 步上传图片时返回的 `id`。
+- Body（JSON）：
+
+```json
+{
+  "token_id": 1,
+  "nft_address": "0xaa6a15D595bA8F69680465FBE61d9d886057Cb1E",
+  "amount": 1
+}
+```
+
+- 说明：
+  - ERC721：`amount` 固定为 `1`。
+  - ERC1155：`amount` 为 mint 的份额数量。
+- 响应：更新后的 asset 记录（与 2.1 返回结构一致）。
+
+前端调用顺序建议：
+
+1. `POST /api/v1/assets` 上传图片，拿到 `id` + `url`。
+2. 调用链上 `mint`（钱包签名，得到 `tokenId`）。
+3. 调用 `POST /api/v1/assets/{id}/mint-info`，把 `tokenId` / `nftAddress` / `amount` 回写后端。
+
+之后就可以通过 `GET /api/v1/assets/by-nft` 或 `GET /api/v1/assets/:id` 查到完整信息。
+
+---
+
+### 2.3 按 ID 查询单个素材
 
 `GET /api/v1/assets/:id`
 
@@ -95,7 +127,7 @@
 
 ---
 
-### 2.3 按 owner 查询素材列表
+### 2.4 按 owner 查询素材列表
 
 `GET /api/v1/assets?owner=0x...`
 
@@ -123,6 +155,35 @@
 ```
 
 ---
+
+### 2.5 用户点击 NFT 图片时，根据链上信息查询素材
+
+`GET /api/v1/assets/by-nft?nft_address=...&token_id=...`
+
+- 场景：用户在前端点击一个已经 mint 的 NFT（前端只知道链上信息：`nftAddress` + `tokenId`），需要从后端拿到当初上传图片时的 metadata（`url` / `name` / `owner` 等）。
+- Query 参数：
+  - `nft_address`（string, 必填）：NFT 合约地址（ERC721 或 ERC1155）
+  - `token_id`（int64, 必填）：链上的 `tokenId`（或 ERC1155 的 `id`）
+- 响应示例：
+
+```json
+{
+  "id": 1,
+  "name": "My First NFT",
+  "owner": "0x1234567890abcdef1234567890abcdef12345678",
+  "cid": "Qm...",
+  "url": "https://gateway.pinata.cloud/ipfs/Qm...",
+  "token_id": 1,
+  "nft_address": "0xaa6a15D595bA8F69680465FBE61d9d886057Cb1E",
+  "amount": 1,
+  "deleted": 0,
+  "created_at": "2025-12-27T15:40:00Z",
+  "updated_at": "2025-12-27T15:40:00Z"
+}
+```
+
+这样前端在任何“从链上拿到 NFT 信息”的场景下，只需要把 `nft_address` + `token_id` 传给后端，就能查回对应的图片和元数据。
+
 
 ## 3. 订单查询（从链上事件同步到 MySQL）
 
@@ -232,4 +293,3 @@
 - 500：内部错误（数据库错误、IPFS 上传失败等）
 
 前端可以统一判断 HTTP 状态码和 `error` 字段做提示。
-

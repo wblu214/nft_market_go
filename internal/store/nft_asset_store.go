@@ -160,3 +160,53 @@ LIMIT ?`
 	}
 	return out, rows.Err()
 }
+
+// UpdateMintInfo updates token_id, nft_address and amount after on-chain mint.
+func (s *NftAssetStore) UpdateMintInfo(ctx context.Context, id int64, tokenID int64, nftAddress string, amount int64) error {
+	const q = `
+UPDATE nft_assets
+SET token_id = ?, nft_address = ?, amount = ?
+WHERE id = ? AND deleted = 0`
+
+	_, err := s.db.ExecContext(ctx, q, tokenID, nftAddress, amount, id)
+	return err
+}
+
+// GetByNFT returns an asset matched by nft_address + token_id.
+func (s *NftAssetStore) GetByNFT(ctx context.Context, nftAddress string, tokenID int64) (*NftAsset, error) {
+	const q = `
+SELECT
+  id,
+  name,
+  owner,
+  cid,
+  url,
+  IFNULL(token_id, 0)     AS token_id,
+  IFNULL(nft_address, '') AS nft_address,
+  IFNULL(amount, 0)       AS amount,
+  deleted,
+  created_at,
+  updated_at
+FROM nft_assets
+WHERE nft_address = ? AND token_id = ? AND deleted = 0
+LIMIT 1`
+
+	row := s.db.QueryRowContext(ctx, q, nftAddress, tokenID)
+	var a NftAsset
+	if err := row.Scan(
+		&a.ID,
+		&a.Name,
+		&a.Owner,
+		&a.CID,
+		&a.URL,
+		&a.TokenID,
+		&a.NFTAddress,
+		&a.Amount,
+		&a.Deleted,
+		&a.CreatedAt,
+		&a.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
