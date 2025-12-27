@@ -180,6 +180,42 @@ LIMIT 1`
 	return true, nil
 }
 
+// SoftDeleteByNFT marks an asset row as deleted (deleted = 1) by nft_address + token_id.
+// This is used when an NFT has been listed and is now由订单管理，不再作为“可用素材”展示。
+func (s *NftAssetStore) SoftDeleteByNFT(ctx context.Context, nftAddress string, tokenID int64) error {
+	const q = `
+UPDATE nft_assets
+SET deleted = 1
+WHERE nft_address = ? AND token_id = ?`
+
+	_, err := s.db.ExecContext(ctx, q, nftAddress, tokenID)
+	return err
+}
+
+// RestoreByNFT cancels logical deletion (deleted = 0) for a row matched by nft_address + token_id.
+// 用于挂单取消后恢复到“我的素材”列表。
+func (s *NftAssetStore) RestoreByNFT(ctx context.Context, nftAddress string, tokenID int64) error {
+	const q = `
+UPDATE nft_assets
+SET deleted = 0
+WHERE nft_address = ? AND token_id = ?`
+
+	_, err := s.db.ExecContext(ctx, q, nftAddress, tokenID)
+	return err
+}
+
+// UpdateOwnerByNFT updates the owner of a given on-chain NFT and clears deleted flag.
+// 用于成交后，把 NFT 的归属从卖家切换到买家，并让其出现在买家的素材列表中。
+func (s *NftAssetStore) UpdateOwnerByNFT(ctx context.Context, nftAddress string, tokenID int64, newOwner string) error {
+	const q = `
+UPDATE nft_assets
+SET owner = ?, deleted = 0
+WHERE nft_address = ? AND token_id = ?`
+
+	_, err := s.db.ExecContext(ctx, q, newOwner, nftAddress, tokenID)
+	return err
+}
+
 // UpdateMintInfo updates token_id, nft_address and amount after on-chain mint.
 func (s *NftAssetStore) UpdateMintInfo(ctx context.Context, id int64, tokenID int64, nftAddress string, amount int64) error {
 	const q = `

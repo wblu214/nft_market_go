@@ -615,6 +615,13 @@ func main() {
 			return
 		}
 
+		// 上架后，这个 NFT 由订单管理，不再作为“可用素材”展示：
+		// 根据 nft_address + token_id 做逻辑删除（deleted = 1），取消挂单时再恢复。
+		if err := assetStore.SoftDeleteByNFT(ctx, req.NFTAddress, req.TokenID); err != nil {
+			log.Printf("SoftDeleteByNFT error (nft_address=%s, token_id=%d): %v", req.NFTAddress, req.TokenID, err)
+			// 不阻断主流程，只记录日志。
+		}
+
 		// Read back full record including order_id / timestamps.
 		orderOut, err := orderStore.GetByID(ctx, req.ListingID)
 		if err != nil {
@@ -683,6 +690,24 @@ func main() {
 			log.Printf("Update order status error: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "db upsert failed"})
 			return
+		}
+
+		// 根据状态更新 nft_assets 视图：
+		// - CANCELED：恢复卖家的素材（deleted=0）
+		// - SUCCESS：把 owner 改成买家地址，并确保 deleted=0
+		if order.NFTAddress != "" && order.TokenID > 0 {
+			switch newStatus {
+			case store.OrderStatusCanceled:
+				if err := assetStore.RestoreByNFT(ctx, order.NFTAddress, order.TokenID); err != nil {
+					log.Printf("RestoreByNFT error (nft_address=%s, token_id=%d): %v", order.NFTAddress, order.TokenID, err)
+				}
+			case store.OrderStatusSuccess:
+				if order.Buyer != "" {
+					if err := assetStore.UpdateOwnerByNFT(ctx, order.NFTAddress, order.TokenID, order.Buyer); err != nil {
+						log.Printf("UpdateOwnerByNFT error (nft_address=%s, token_id=%d, buyer=%s): %v", order.NFTAddress, order.TokenID, order.Buyer, err)
+					}
+				}
+			}
 		}
 
 		orderOut, err := orderStore.GetByID(ctx, id)
