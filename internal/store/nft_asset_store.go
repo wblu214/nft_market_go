@@ -243,7 +243,7 @@ SELECT
   created_at,
   updated_at
 FROM nft_assets
-WHERE nft_address = ? AND token_id = ? AND deleted = 0
+WHERE nft_address = ? AND token_id = ?
 LIMIT 1`
 
 	row := s.db.QueryRowContext(ctx, q, nftAddress, tokenID)

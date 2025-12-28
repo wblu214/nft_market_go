@@ -343,6 +343,14 @@ const swaggerJSON = `{
                   "type": "integer",
                   "format": "int64"
                 },
+                "nft_name": {
+                  "type": "string",
+                  "description": "Optional human readable NFT name"
+                },
+                "url": {
+                  "type": "string",
+                  "description": "NFT image URL"
+                },
                 "price": {
                   "type": "string",
                   "description": "Price in wei, decimal string"
@@ -577,6 +585,8 @@ func main() {
 			NFTAddress string `json:"nft_address"`
 			TokenID    int64  `json:"token_id"`
 			Amount     int64  `json:"amount"`
+			NFTName    string `json:"nft_name"`
+			URL        string `json:"url"`
 			Price      string `json:"price"`   // decimal string in wei
 			TxHash     string `json:"tx_hash"` // optional tx hash of list transaction
 		}
@@ -595,12 +605,25 @@ func main() {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 		defer cancel()
 
+		// 如果前端没有传 nft_name 或 url，尝试从 nft_assets 中按 nft_address + token_id 读取。
+		if (req.NFTName == "" || req.URL == "") && req.NFTAddress != "" && req.TokenID > 0 {
+			if asset, err := assetStore.GetByNFT(ctx, req.NFTAddress, req.TokenID); err == nil {
+				if req.NFTName == "" {
+					req.NFTName = asset.Name
+				}
+				if req.URL == "" {
+					req.URL = asset.URL
+				}
+			}
+		}
+
 		order := &store.Order{
 			ListingID:  req.ListingID,
 			Seller:     req.Seller,
 			Buyer:      "",
-			NFTName:    "",
+			NFTName:    req.NFTName,
 			NFTAddress: req.NFTAddress,
+			URL:        req.URL,
 			TokenID:    req.TokenID,
 			Amount:     req.Amount,
 			Price:      req.Price,

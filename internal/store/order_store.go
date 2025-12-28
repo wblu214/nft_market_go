@@ -28,6 +28,7 @@ type Order struct {
 	Buyer      string      `json:"buyer"`
 	NFTName    string      `json:"nft_name"`
 	NFTAddress string      `json:"nft_address"`
+	URL        string      `json:"url"`
 	TokenID    int64       `json:"token_id"`
 	Amount     int64       `json:"amount"`
 	Price      string      `json:"price"` // wei, matches DECIMAL(36,0)
@@ -64,13 +65,14 @@ func (s *OrderStore) Upsert(ctx context.Context, o *Order) error {
 	const q = `
 INSERT INTO orders (
   listing_id, seller, buyer, nft_name, nft_address,
-  token_id, amount, price, status, tx_hash, deleted
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  url, token_id, amount, price, status, tx_hash, deleted
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   seller = VALUES(seller),
   buyer = VALUES(buyer),
   nft_name = VALUES(nft_name),
   nft_address = VALUES(nft_address),
+  url = VALUES(url),
   token_id = VALUES(token_id),
   amount = VALUES(amount),
   price = VALUES(price),
@@ -84,6 +86,7 @@ ON DUPLICATE KEY UPDATE
 		o.Buyer,
 		o.NFTName,
 		o.NFTAddress,
+		o.URL,
 		o.TokenID,
 		o.Amount,
 		o.Price,
@@ -104,6 +107,7 @@ SELECT
   IFNULL(buyer, '') AS buyer,
   IFNULL(nft_name, '') AS nft_name,
   nft_address,
+  IFNULL(url, '') AS url,
   token_id,
   amount,
   price,
@@ -123,6 +127,7 @@ FROM orders WHERE listing_id = ?`
 		&o.Buyer,
 		&o.NFTName,
 		&o.NFTAddress,
+		&o.URL,
 		&o.TokenID,
 		&o.Amount,
 		&o.Price,
@@ -150,6 +155,7 @@ SELECT
   IFNULL(buyer, '') AS buyer,
   IFNULL(nft_name, '') AS nft_name,
   nft_address,
+  IFNULL(url, '') AS url,
   token_id,
   amount,
   price,
@@ -179,6 +185,7 @@ LIMIT ?`
 			&o.Buyer,
 			&o.NFTName,
 			&o.NFTAddress,
+			&o.URL,
 			&o.TokenID,
 			&o.Amount,
 			&o.Price,

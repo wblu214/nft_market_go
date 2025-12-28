@@ -205,6 +205,7 @@
   "nft_address": "0xaa6a15D595bA8F69680465FBE61d9d886057Cb1E",
   "token_id": 1,
   "amount": 1,
+  "url": "https://gateway.pinata.cloud/ipfs/Qm...", 
   "price": "1000000000000000000",
   "tx_hash": "0x9f0593086fd71fafa7fa1f5f65921893ab4f8c8733b2f15ebe9529423d46b107"
 }
@@ -216,6 +217,7 @@
   - `nft_address`：NFT 合约地址（ERC721 / ERC1155）
   - `token_id`：上架的 `tokenId`（或 ERC1155 的 `id`）
   - `amount`：数量（ERC721 = 1；ERC1155 为上架份数）
+  - `url`：NFT 图片的 HTTP 地址（建议从 `POST /api/v1/assets` 的返回里直接带过来）
   - `price`：价格（wei，十进制字符串）
   - `tx_hash`：`list` 这笔交易的 hash（可选，但建议带上）
 

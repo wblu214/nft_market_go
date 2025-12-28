@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS `orders` (
   `buyer` VARCHAR(64) DEFAULT NULL COMMENT 'Buyer address',
   `nft_name` VARCHAR(255) DEFAULT NULL COMMENT 'Human readable NFT name',
   `nft_address` VARCHAR(64) NOT NULL COMMENT 'NFT contract address',
+  `url` VARCHAR(512) DEFAULT NULL COMMENT 'NFT image URL',
   `token_id` BIGINT NOT NULL COMMENT 'NFT tokenId',
   `amount` BIGINT NOT NULL COMMENT 'Amount (ERC1155)',
   `price` DECIMAL(36,0) NOT NULL COMMENT 'Price in wei',
