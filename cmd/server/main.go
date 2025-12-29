@@ -13,10 +13,12 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/redis/go-redis/v9"
 	"gopkg.in/yaml.v3"
 
 	"github.com/nft_market_go/internal/chain"
 	"github.com/nft_market_go/internal/ipfs"
+	"github.com/nft_market_go/internal/lock"
 	"github.com/nft_market_go/internal/store"
 )
 
@@ -28,6 +30,9 @@ type basicConfig struct {
 	ProjectNFTAddress  string
 	Project1155Address string
 	MySQLDSN           string
+	RedisAddr          string
+	RedisPassword      string
+	RedisDB            int
 	PinataAPIURL       string
 	PinataGatewayURL   string
 	PinataAPIKey       string
@@ -51,6 +56,11 @@ type yamlConfig struct {
 	MySQL struct {
 		DSN string `yaml:"dsn"`
 	} `yaml:"mysql"`
+	Redis struct {
+		Addr     string `yaml:"addr"`
+		Password string `yaml:"password"`
+		DB       int    `yaml:"db"`
+	} `yaml:"redis"`
 	IPFS struct {
 		APIURL       string `yaml:"api-url"`
 		GatewayURL   string `yaml:"gateway-url"`
@@ -85,6 +95,9 @@ func loadConfig() (*basicConfig, error) {
 		cfg.ProjectNFTAddress = yc.Contracts.ProjectNFT
 		cfg.Project1155Address = yc.Contracts.Project1155
 		cfg.MySQLDSN = yc.MySQL.DSN
+		cfg.RedisAddr = yc.Redis.Addr
+		cfg.RedisPassword = yc.Redis.Password
+		cfg.RedisDB = yc.Redis.DB
 		cfg.PinataAPIURL = yc.IPFS.APIURL
 		cfg.PinataGatewayURL = yc.IPFS.GatewayURL
 		cfg.PinataAPIKey = yc.IPFS.APIKey
@@ -107,6 +120,17 @@ func loadConfig() (*basicConfig, error) {
 	}
 	if v := os.Getenv("MYSQL_DSN"); v != "" {
 		cfg.MySQLDSN = v
+	}
+	if v := os.Getenv("REDIS_ADDR"); v != "" {
+		cfg.RedisAddr = v
+	}
+	if v := os.Getenv("REDIS_PASSWORD"); v != "" {
+		cfg.RedisPassword = v
+	}
+	if v := os.Getenv("REDIS_DB"); v != "" {
+		if dbIdx, err := strconv.Atoi(v); err == nil {
+			cfg.RedisDB = dbIdx
+		}
 	}
 	if v := os.Getenv("PINATA_API_URL"); v != "" {
 		cfg.PinataAPIURL = v
@@ -487,6 +511,27 @@ func main() {
 	}
 	defer db.Close()
 
+	// Initialize Redis client for concurrency control (locks, etc.).
+	if cfg.RedisAddr == "" {
+		cfg.RedisAddr = "localhost:6379"
+	}
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisAddr,
+		Password: cfg.RedisPassword,
+		DB:       cfg.RedisDB,
+	})
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		log.Fatalf("failed to connect to redis: %v", err)
+	}
+	defer func() {
+		if err := rdb.Close(); err != nil {
+			log.Printf("redis close error: %v", err)
+		}
+	}()
+
+	// Locker for per-listing concurrency control in order APIs.
+	orderLocker := lock.NewRedisLocker(rdb, "nft_market:order:")
+
 	log.Printf("connected to mysql")
 
 	// Initialize basic schema for marketplace orders and NFT assets.
@@ -518,6 +563,19 @@ func main() {
 			log.Printf("failed to init marketplace scanner: %v", err)
 		} else {
 			go scanner.Run(context.Background())
+			// Periodic reconciliation job: rescan recent blocks to repair backend
+			// state in case some events were missed (e.g. RPC errors, process restarts).
+			go func() {
+				ticker := time.NewTicker(1 * time.Minute)
+				defer ticker.Stop()
+				for range ticker.C {
+					reconCtx, cancelRecon := context.WithTimeout(context.Background(), 30*time.Second)
+					if err := scanner.ResyncRecent(reconCtx, 300); err != nil {
+						log.Printf("marketplace reconcile recent events error: %v", err)
+					}
+					cancelRecon()
+				}
+			}()
 			log.Printf("marketplace scanner started for contract %s", cfg.MarketplaceAddress)
 		}
 	}
@@ -605,6 +663,25 @@ func main() {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 		defer cancel()
 
+		// Acquire per-listing lock to prevent concurrent create/update on the same listing.
+		lockKey := "listing:" + strconv.FormatInt(req.ListingID, 10)
+		orderLock, err := orderLocker.Acquire(ctx, lockKey, 10*time.Second)
+		if err != nil {
+			if err == lock.ErrLockNotAcquired {
+				c.JSON(http.StatusConflict, gin.H{"error": "order is being processed, please retry"})
+			} else {
+				log.Printf("acquire order lock error: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			}
+			return
+		}
+		defer func() {
+			// Use background context so Release is not affected by request timeout.
+			if err := orderLock.Release(context.Background()); err != nil {
+				log.Printf("release order lock error: %v", err)
+			}
+		}()
+
 		// 如果前端没有传 nft_name 或 url，尝试从 nft_assets 中按 nft_address + token_id 读取。
 		if (req.NFTName == "" || req.URL == "") && req.NFTAddress != "" && req.TokenID > 0 {
 			if asset, err := assetStore.GetByNFT(ctx, req.NFTAddress, req.TokenID); err == nil {
@@ -616,6 +693,21 @@ func main() {
 				}
 			}
 		}
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			log.Printf("begin tx for create order error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db begin tx failed"})
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+					log.Printf("rollback tx for create order error: %v", err)
+				}
+			}
+		}()
 
 		order := &store.Order{
 			ListingID:  req.ListingID,
@@ -632,7 +724,7 @@ func main() {
 			Deleted:    0,
 		}
 
-		if err := orderStore.Upsert(ctx, order); err != nil {
+		if err := orderStore.UpsertTx(ctx, tx, order); err != nil {
 			log.Printf("Create order error: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "db upsert failed"})
 			return
@@ -640,10 +732,18 @@ func main() {
 
 		// 上架后，这个 NFT 由订单管理，不再作为“可用素材”展示：
 		// 根据 nft_address + token_id 做逻辑删除（deleted = 1），取消挂单时再恢复。
-		if err := assetStore.SoftDeleteByNFT(ctx, req.NFTAddress, req.TokenID); err != nil {
-			log.Printf("SoftDeleteByNFT error (nft_address=%s, token_id=%d): %v", req.NFTAddress, req.TokenID, err)
-			// 不阻断主流程，只记录日志。
+		if err := assetStore.SoftDeleteByNFTTx(ctx, tx, req.NFTAddress, req.TokenID); err != nil {
+			log.Printf("SoftDeleteByNFTTx error (nft_address=%s, token_id=%d): %v", req.NFTAddress, req.TokenID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db asset update failed"})
+			return
 		}
+
+		if err := tx.Commit(); err != nil {
+			log.Printf("commit tx for create order error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db commit failed"})
+			return
+		}
+		committed = true
 
 		// Read back full record including order_id / timestamps.
 		orderOut, err := orderStore.GetByID(ctx, req.ListingID)
@@ -691,10 +791,44 @@ func main() {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 		defer cancel()
 
-		order, err := orderStore.GetByID(ctx, id)
+		// Acquire per-listing lock to serialize status updates and avoid
+		// concurrent buyers updating the same order.
+		lockKey := "listing:" + strconv.FormatInt(id, 10)
+		statusLock, err := orderLocker.Acquire(ctx, lockKey, 10*time.Second)
+		if err != nil {
+			if err == lock.ErrLockNotAcquired {
+				c.JSON(http.StatusConflict, gin.H{"error": "order is being processed, please retry"})
+			} else {
+				log.Printf("acquire order status lock error: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			}
+			return
+		}
+		defer func() {
+			if err := statusLock.Release(context.Background()); err != nil {
+				log.Printf("release order status lock error: %v", err)
+			}
+		}()
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			log.Printf("begin tx for order status error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db begin tx failed"})
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+					log.Printf("rollback tx for order status error: %v", err)
+				}
+			}
+		}()
+
+		order, err := orderStore.GetByIDForUpdateTx(ctx, tx, id)
 		if err != nil {
 			if err != sql.ErrNoRows {
-				log.Printf("GetByID in status update error: %v", err)
+				log.Printf("GetByIDForUpdate in status update error: %v", err)
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "db query failed"})
 				return
 			}
@@ -704,12 +838,22 @@ func main() {
 			}
 		}
 
+		// Once an order is finalized (SUCCESS or CANCELED), do not allow
+		// switching to a different terminal state.
+		if order.Status == store.OrderStatusSuccess || order.Status == store.OrderStatusCanceled {
+			if order.Status != newStatus {
+				c.JSON(http.StatusConflict, gin.H{"error": "order already finalized"})
+				return
+			}
+			// Same status: treat as idempotent and continue.
+		}
+
 		order.Status = newStatus
 		if newStatus == store.OrderStatusSuccess && req.Buyer != "" {
 			order.Buyer = req.Buyer
 		}
 
-		if err := orderStore.Upsert(ctx, order); err != nil {
+		if err := orderStore.UpsertTx(ctx, tx, order); err != nil {
 			log.Printf("Update order status error: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "db upsert failed"})
 			return
@@ -721,17 +865,28 @@ func main() {
 		if order.NFTAddress != "" && order.TokenID > 0 {
 			switch newStatus {
 			case store.OrderStatusCanceled:
-				if err := assetStore.RestoreByNFT(ctx, order.NFTAddress, order.TokenID); err != nil {
-					log.Printf("RestoreByNFT error (nft_address=%s, token_id=%d): %v", order.NFTAddress, order.TokenID, err)
+				if err := assetStore.RestoreByNFTTx(ctx, tx, order.NFTAddress, order.TokenID); err != nil {
+					log.Printf("RestoreByNFTTx error (nft_address=%s, token_id=%d): %v", order.NFTAddress, order.TokenID, err)
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "db asset update failed"})
+					return
 				}
 			case store.OrderStatusSuccess:
 				if order.Buyer != "" {
-					if err := assetStore.UpdateOwnerByNFT(ctx, order.NFTAddress, order.TokenID, order.Buyer); err != nil {
-						log.Printf("UpdateOwnerByNFT error (nft_address=%s, token_id=%d, buyer=%s): %v", order.NFTAddress, order.TokenID, order.Buyer, err)
+					if err := assetStore.UpdateOwnerByNFTTx(ctx, tx, order.NFTAddress, order.TokenID, order.Buyer); err != nil {
+						log.Printf("UpdateOwnerByNFTTx error (nft_address=%s, token_id=%d, buyer=%s): %v", order.NFTAddress, order.TokenID, order.Buyer, err)
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "db asset update failed"})
+						return
 					}
 				}
 			}
 		}
+
+		if err := tx.Commit(); err != nil {
+			log.Printf("commit tx for order status error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db commit failed"})
+			return
+		}
+		committed = true
 
 		orderOut, err := orderStore.GetByID(ctx, id)
 		if err != nil {

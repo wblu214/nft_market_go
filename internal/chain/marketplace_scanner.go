@@ -165,6 +165,95 @@ func (s *MarketplaceScanner) Run(ctx context.Context) {
 	}
 }
 
+// ResyncRecent rescans the recent block range [latest-lookback+1, latest]
+// and re-applies marketplace events to the orders table. This helps repair
+// backend state when some events were missed due to temporary RPC errors
+// or downtime. It is safe to call periodically; writes are idempotent.
+func (s *MarketplaceScanner) ResyncRecent(ctx context.Context, lookbackBlocks uint64) error {
+	head, err := s.client.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return err
+	}
+	latest := head.Number.Uint64()
+	if latest == 0 {
+		return nil
+	}
+
+	var from uint64 = 1
+	if lookbackBlocks > 0 && lookbackBlocks < latest {
+		from = latest - lookbackBlocks + 1
+	}
+
+	batchSize := s.maxBatchBlocks
+
+	for from <= latest {
+		to := from + batchSize - 1
+		if to > latest {
+			to = latest
+		}
+
+		// Only care about Listed / Cancelled / Sold events.
+		topics := [][]common.Hash{
+			{
+				s.abi.Events["Listed"].ID,
+				s.abi.Events["Cancelled"].ID,
+				s.abi.Events["Sold"].ID,
+			},
+		}
+
+		query := ethereum.FilterQuery{
+			FromBlock: big.NewInt(int64(from)),
+			ToBlock:   big.NewInt(int64(to)),
+			Addresses: []common.Address{s.contract},
+			Topics:    topics,
+		}
+
+		logs, err := s.client.FilterLogs(ctx, query)
+		if err != nil {
+			limitErr := strings.Contains(err.Error(), "limit exceeded")
+			if limitErr {
+				// Throttle logging for noisy RPC limit errors.
+				now := time.Now()
+				if now.Sub(s.lastLimitLog) > 5*time.Second {
+					s.logger.Printf("marketplace scanner: reconcile FilterLogs limit exceeded (from %d to %d)", from, to)
+					s.lastLimitLog = now
+				}
+
+				// If RPC complains about limits, reduce batch size and retry from the same block.
+				if batchSize > 1 {
+					batchSize = batchSize / 2
+					if batchSize < 1 {
+						batchSize = 1
+					}
+					continue
+				}
+				// Already at batch size 1 and still hitting limits: skip this block range.
+				now = time.Now()
+				if now.Sub(s.lastLimitLog) > 5*time.Second {
+					s.logger.Printf("marketplace scanner: reconcile skipping block range %d-%d due to persistent RPC limit errors", from, to)
+					s.lastLimitLog = now
+				}
+				from = to + 1
+				continue
+			}
+
+			// Other errors: log once and abort this reconciliation pass; caller can retry later.
+			s.logger.Printf("marketplace scanner: reconcile FilterLogs error (from %d to %d): %v", from, to, err)
+			return err
+		}
+
+		for _, lg := range logs {
+			if err := s.handleLog(ctx, lg); err != nil {
+				s.logger.Printf("marketplace scanner: reconcile handleLog error: %v", err)
+			}
+		}
+
+		from = to + 1
+	}
+
+	return nil
+}
+
 func (s *MarketplaceScanner) handleLog(ctx context.Context, lg types.Log) error {
 	if len(lg.Topics) == 0 {
 		return nil

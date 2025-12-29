@@ -62,6 +62,15 @@ func (s *OrderStore) InitSchema(ctx context.Context) error {
 
 // Upsert creates or updates an order row.
 func (s *OrderStore) Upsert(ctx context.Context, o *Order) error {
+	return upsertOrder(ctx, s.db, o)
+}
+
+// UpsertTx creates or updates an order row using the provided transaction.
+func (s *OrderStore) UpsertTx(ctx context.Context, tx *sql.Tx, o *Order) error {
+	return upsertOrder(ctx, tx, o)
+}
+
+func upsertOrder(ctx context.Context, exec sqlExecutor, o *Order) error {
 	const q = `
 INSERT INTO orders (
   listing_id, seller, buyer, nft_name, nft_address,
@@ -80,7 +89,7 @@ ON DUPLICATE KEY UPDATE
   tx_hash = VALUES(tx_hash),
   deleted = VALUES(deleted);`
 
-	_, err := s.db.ExecContext(ctx, q,
+	_, err := exec.ExecContext(ctx, q,
 		o.ListingID,
 		o.Seller,
 		o.Buyer,
@@ -99,7 +108,17 @@ ON DUPLICATE KEY UPDATE
 
 // GetByID returns a single order by listing ID.
 func (s *OrderStore) GetByID(ctx context.Context, listingID int64) (*Order, error) {
-	const q = `
+	return getOrderByID(ctx, s.db, listingID, false)
+}
+
+// GetByIDForUpdateTx returns a single order by listing ID and locks the row
+// for update within the given transaction.
+func (s *OrderStore) GetByIDForUpdateTx(ctx context.Context, tx *sql.Tx, listingID int64) (*Order, error) {
+	return getOrderByID(ctx, tx, listingID, true)
+}
+
+func getOrderByID(ctx context.Context, exec sqlExecutor, listingID int64, forUpdate bool) (*Order, error) {
+	const baseQuery = `
 SELECT
   order_id,
   IFNULL(listing_id, 0) AS listing_id,
@@ -118,7 +137,12 @@ SELECT
   updated_at
 FROM orders WHERE listing_id = ?`
 
-	row := s.db.QueryRowContext(ctx, q, listingID)
+	q := baseQuery
+	if forUpdate {
+		q = q + " FOR UPDATE"
+	}
+
+	row := exec.QueryRowContext(ctx, q, listingID)
 	var o Order
 	if err := row.Scan(
 		&o.OrderID,
