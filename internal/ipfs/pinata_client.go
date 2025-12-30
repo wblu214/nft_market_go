@@ -21,7 +21,6 @@ type PinataClient struct {
 	secretAPIKey string
 	httpClient   *http.Client
 }
-
 // NewPinataClient creates a new client.
 func NewPinataClient(apiURL, gatewayURL, apiKey, secret string) *PinataClient {
 	if apiURL == "" {
