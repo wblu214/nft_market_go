@@ -30,7 +30,6 @@ type MarketplaceScanner struct {
 	maxBatchBlocks uint64
 	lastLimitLog   time.Time
 }
-
 // NewMarketplaceScanner creates a scanner using the NFTMarketplace ABI at docs/NFTMarketplace.abi.json.
 func NewMarketplaceScanner(client *ethclient.Client, contractAddr common.Address, orders *store.OrderStore, logger *log.Logger) (*MarketplaceScanner, error) {
 	data, err := os.ReadFile("docs/NFTMarketplace.abi.json")
