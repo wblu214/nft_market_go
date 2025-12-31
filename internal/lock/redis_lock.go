@@ -67,6 +67,7 @@ else
 end`
 
 	cmd := l.client.Eval(ctx, script, []string{l.key}, l.value)
+
 	return cmd.Err()
 }
 
