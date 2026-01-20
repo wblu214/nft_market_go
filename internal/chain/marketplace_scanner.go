@@ -266,7 +266,6 @@ func (s *MarketplaceScanner) handleLog(ctx context.Context, lg types.Log) error 
 		return s.handleListed(ctx, lg)
 	case s.abi.Events["Cancelled"].ID:
 		return s.handleCancelled(ctx, lg)
-
 	case s.abi.Events["Sold"].ID:
 		return s.handleSold(ctx, lg)
 	default:
