@@ -260,7 +260,6 @@ func (s *MarketplaceScanner) handleLog(ctx context.Context, lg types.Log) error 
 	}
 
 	sig := lg.Topics[0]
-
 	switch sig {
 	case s.abi.Events["Listed"].ID:
 		return s.handleListed(ctx, lg)
